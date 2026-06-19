@@ -10,6 +10,7 @@ import io
 import contextlib
 from pathlib import Path
 from typing import Any
+import logging
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,10 @@ from fastapi.staticfiles import StaticFiles
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 
+# Setup logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="MTF Dashboard Agent", version="2.0.0")
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
@@ -29,6 +34,11 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 USE_MOCK = os.environ.get("USE_MOCK", "").lower() in ("1", "true", "yes")
 ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY", "")
 PREFER_ALPHAVANTAGE = os.environ.get("PREFER_ALPHAVANTAGE", "true").lower() in ("1", "true", "yes")
+
+# Cache for Alpha Vantage responses: {(ticker, interval): (timestamp, df)}
+# TTL is 60 seconds to respect rate limits and keep data fresh
+AV_CACHE: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
+AV_CACHE_TTL = 60
 
 TIMEFRAMES: dict[str, dict[str, Any]] = {
     "W": {"period": "2y", "interval": "1wk"},
@@ -94,6 +104,7 @@ def _try_yfinance(ticker: str, period: str, interval: str) -> pd.DataFrame:
     last_exc: Exception | None = None
     for attempt in range(attempts):
         try:
+            logger.debug(f"yfinance attempt {attempt + 1}/{attempts} for {ticker} interval={interval}")
             # suppress yfinance noisy prints by redirecting stdout/stderr
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
@@ -107,11 +118,14 @@ def _try_yfinance(ticker: str, period: str, interval: str) -> pd.DataFrame:
                     prepost=False,
                 )
             if data.empty:
+                logger.debug(f"yfinance returned empty data for {ticker} interval={interval}")
                 last_exc = None
                 continue
+            logger.info(f"yfinance succeeded for {ticker} interval={interval}")
             return normalize_frame(data)
         except (JSONDecodeError, ValueError) as exc:
             last_exc = exc
+            logger.warning(f"yfinance attempt {attempt + 1} failed for {ticker}: {exc}")
             if attempt < attempts - 1:
                 time.sleep(delay)
                 delay *= 2
@@ -120,12 +134,14 @@ def _try_yfinance(ticker: str, period: str, interval: str) -> pd.DataFrame:
             break
         except Exception as exc:  # fallback retry for intermittent network/errors
             last_exc = exc
+            logger.warning(f"yfinance attempt {attempt + 1} error for {ticker}: {exc}")
             if attempt < attempts - 1:
                 time.sleep(delay)
                 delay *= 2
                 continue
             # final attempt failed; don't raise, let caller fallback
             break
+    logger.info(f"yfinance exhausted retries for {ticker} interval={interval}; falling back")
     # return empty to indicate no data from yfinance (caller may fallback)
     return pd.DataFrame()
 
@@ -140,11 +156,15 @@ def download_history(ticker: str, period: str, interval: str, cache_bucket: int)
 
     def try_av() -> pd.DataFrame:
         try:
+            logger.debug(f"Attempting Alpha Vantage for {ticker} interval={interval}")
             av_df = fetch_av_history(ticker, period, interval, ALPHAVANTAGE_API_KEY)
             if not av_df.empty:
+                logger.info(f"Alpha Vantage succeeded for {ticker} interval={interval}")
                 return normalize_frame(av_df)
+            logger.debug(f"Alpha Vantage returned empty for {ticker} interval={interval}")
         except Exception as exc:
             nonlocal last_exc
+            logger.warning(f"Alpha Vantage error for {ticker} interval={interval}: {exc}")
             last_exc = exc
         return pd.DataFrame()
 
@@ -230,7 +250,20 @@ def generate_mock_history(ticker: str, period: str, interval: str) -> pd.DataFra
 
 
 def fetch_av_history(ticker: str, period: str, interval: str, api_key: str) -> pd.DataFrame:
-    """Fetch OHLCV from Alpha Vantage. Returns DataFrame indexed by UTC timestamps."""
+    """Fetch OHLCV from Alpha Vantage with caching. Returns DataFrame indexed by UTC timestamps."""
+    # Check cache first
+    cache_key = (ticker, interval)
+    now = time.time()
+    if cache_key in AV_CACHE:
+        ts, cached_df = AV_CACHE[cache_key]
+        if now - ts < AV_CACHE_TTL:
+            logger.info(f"Alpha Vantage cache hit for {ticker} interval={interval}")
+            return cached_df
+        else:
+            logger.debug(f"Alpha Vantage cache expired for {ticker} interval={interval}")
+            del AV_CACHE[cache_key]
+
+    logger.debug(f"Fetching Alpha Vantage data for {ticker} interval={interval}")
     base = "https://www.alphavantage.co/query"
     # map our interval to AV function/interval
     if interval == "1wk":
@@ -252,27 +285,36 @@ def fetch_av_history(ticker: str, period: str, interval: str, api_key: str) -> p
         params = {"function": "TIME_SERIES_INTRADAY", "symbol": ticker, "interval": av_interval, "apikey": api_key, "datatype": "json", "outputsize": "compact"}
         key = f"Time Series ({av_interval})"
 
-    resp = requests.get(base, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    if key not in data:
-        return pd.DataFrame()
+    try:
+        resp = requests.get(base, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if key not in data:
+            logger.warning(f"Alpha Vantage missing key '{key}' for {ticker}; may be rate limited")
+            return pd.DataFrame()
 
-    ts = data[key]
-    # convert to DataFrame
-    df = pd.DataFrame.from_dict(ts, orient="index")
-    # columns from AV are like '1. open', '2. high', etc.
-    df = df.rename(columns=lambda c: c.split('. ', 1)[-1].title())
-    # ensure numeric types
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    # index to datetime
-    df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
-    # Alpha Vantage times are in local exchange time; assume UTC for now
-    df.index = df.index.tz_localize(None)
-    return df[[c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]]
+        ts_data = data[key]
+        # convert to DataFrame
+        df = pd.DataFrame.from_dict(ts_data, orient="index")
+        # columns from AV are like '1. open', '2. high', etc.
+        df = df.rename(columns=lambda c: c.split('. ', 1)[-1].title())
+        # ensure numeric types
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        # index to datetime
+        df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+        # Alpha Vantage times are in local exchange time; assume UTC for now
+        df.index = df.index.tz_localize(None)
+        result = df[[c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]]
+        # Cache the result
+        AV_CACHE[cache_key] = (time.time(), result)
+        logger.info(f"Alpha Vantage succeeded for {ticker} interval={interval}; cached")
+        return result
+    except Exception as exc:
+        logger.error(f"Alpha Vantage fetch failed for {ticker} interval={interval}: {exc}")
+        return pd.DataFrame()
 
 def latest_float(series: pd.Series) -> float | None:
     if series.empty or pd.isna(series.iloc[-1]):
@@ -362,11 +404,14 @@ def scan_ticker(ticker: str, cache_bucket: int) -> dict[str, Any]:
     for label, config in TIMEFRAMES.items():
         try:
             frames[label] = frame_for_ticker(ticker, label, config, cache_bucket)
-        except Exception:
+        except Exception as exc:
             # Fallback to per-timeframe mock if live fetching/resampling fails for this timeframe
+            logger.warning(f"Failed to fetch {label} for {ticker}: {exc}; using mock fallback")
             try:
                 frames[label] = normalize_frame(generate_mock_history(ticker, config["period"], config["interval"]))
-            except Exception:
+                logger.info(f"Using mock fallback for {label} on {ticker}")
+            except Exception as mock_exc:
+                logger.error(f"Mock fallback also failed for {label} on {ticker}: {mock_exc}")
                 frames[label] = pd.DataFrame()
         signals[label] = compute_signal(label, frames[label])
 
