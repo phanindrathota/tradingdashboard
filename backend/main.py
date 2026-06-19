@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +27,7 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 # Environment toggle: set USE_MOCK=1|true to force demo/mock OHLCV data
 USE_MOCK = os.environ.get("USE_MOCK", "").lower() in ("1", "true", "yes")
+ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY", "")
 
 TIMEFRAMES: dict[str, dict[str, Any]] = {
     "W": {"period": "2y", "interval": "1wk"},
@@ -90,6 +92,15 @@ def download_history(ticker: str, period: str, interval: str, cache_bucket: int)
     del cache_bucket
     if USE_MOCK:
         return normalize_frame(generate_mock_history(ticker, period, interval))
+    # Prefer Alpha Vantage if API key provided (falls back to yfinance)
+    if ALPHAVANTAGE_API_KEY:
+        try:
+            av_df = fetch_av_history(ticker, period, interval, ALPHAVANTAGE_API_KEY)
+            if not av_df.empty:
+                return normalize_frame(av_df)
+        except Exception:
+            # fall through to yfinance fallback
+            pass
     attempts = 3
     delay = 1
     last_exc: Exception | None = None
@@ -186,6 +197,52 @@ def generate_mock_history(ticker: str, period: str, interval: str) -> pd.DataFra
 
     df = pd.DataFrame({"Open": openp.values, "High": high.values, "Low": low.values, "Close": close.values, "Volume": volume.values}, index=rng)
     return df
+
+
+def fetch_av_history(ticker: str, period: str, interval: str, api_key: str) -> pd.DataFrame:
+    """Fetch OHLCV from Alpha Vantage. Returns DataFrame indexed by UTC timestamps."""
+    base = "https://www.alphavantage.co/query"
+    # map our interval to AV function/interval
+    if interval == "1wk":
+        params = {"function": "TIME_SERIES_WEEKLY", "symbol": ticker, "apikey": api_key, "datatype": "json"}
+        key = "Weekly Time Series"
+    elif interval == "1d":
+        params = {"function": "TIME_SERIES_DAILY_ADJUSTED", "symbol": ticker, "apikey": api_key, "datatype": "json"}
+        key = "Time Series (Daily)"
+    else:
+        # intraday mapping: use closest supported interval
+        av_interval = {
+            "1h": "60min",
+            "65m/1H": "60min",
+            "30m": "30min",
+            "15m": "15min",
+            "10m": "5min",
+            "5m": "5min",
+        }.get(interval, "60min")
+        params = {"function": "TIME_SERIES_INTRADAY", "symbol": ticker, "interval": av_interval, "apikey": api_key, "datatype": "json", "outputsize": "compact"}
+        key = f"Time Series ({av_interval})"
+
+    resp = requests.get(base, params=params, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    if key not in data:
+        return pd.DataFrame()
+
+    ts = data[key]
+    # convert to DataFrame
+    df = pd.DataFrame.from_dict(ts, orient="index")
+    # columns from AV are like '1. open', '2. high', etc.
+    df = df.rename(columns=lambda c: c.split('. ', 1)[-1].title())
+    # ensure numeric types
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    # index to datetime
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    # Alpha Vantage times are in local exchange time; assume UTC for now
+    df.index = df.index.tz_localize(None)
+    return df[[c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]]
 
 def latest_float(series: pd.Series) -> float | None:
     if series.empty or pd.isna(series.iloc[-1]):

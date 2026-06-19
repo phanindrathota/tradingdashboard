@@ -12,8 +12,18 @@ pip install -r requirements.txt
 USE_MOCK=1 python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-- Setting `USE_MOCK=1` forces demo/mock OHLCV data (useful offline or behind rate limits).
-- By default the app will attempt live downloads and fallback to mock data when downloads fail.
+ - Setting `USE_MOCK=1` forces demo/mock OHLCV data (useful offline or behind rate limits).
+ - By default the app will attempt live downloads and fallback to mock data when downloads fail.
+
+Optional: Alpha Vantage live data
+---------------------------------
+- Set `ALPHAVANTAGE_API_KEY` to enable Alpha Vantage as the preferred live provider. Example:
+
+```bash
+ALPHAVANTAGE_API_KEY=your_key_here python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+If the key is present the backend will try Alpha Vantage first and fall back to yfinance or mock data when necessary.
 
 Open http://127.0.0.1:8000/ in your browser.
 # MTF Dashboard Agent
