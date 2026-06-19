@@ -1,0 +1,31 @@
+# MTF Dashboard Agent
+
+A local FastAPI + HTML/CSS/JavaScript dashboard that scans Yahoo Finance data with `yfinance` and summarizes bull, bear, and chop conditions across multiple timeframes.
+
+## Features
+
+- Editable ticker list with manual refresh and 60-second auto-refresh.
+- Multi-timeframe columns: Weekly, Daily, 4H, 65m/1H, 30m, 15m, 10m, and 5m.
+- Indicator checks for EMA 9/21/50 stacks, SMA 200 side, VWAP side, 15-minute opening range breakout, and volume expansion.
+- Green bullish, red bearish, and yellow/gray wait/chop states.
+
+## MacBook run instructions
+
+From the project folder, run:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn backend.main:app --reload --port 8000
+```
+
+Then open:
+
+```text
+http://localhost:8000
+```
+
+## Notes
+
+Yahoo Finance intraday availability can vary by symbol and interval. The app uses a 1-hour approximation for the requested 65-minute timeframe and resamples 1-hour data into 4-hour bars and 5-minute data into 10-minute bars.
