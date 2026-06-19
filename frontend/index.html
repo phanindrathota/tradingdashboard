@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MTF Dashboard Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Yahoo Finance • Multi-timeframe scanner</p>
+          <h1>MTF Dashboard Agent</h1>
+          <p class="subtitle">Track EMA stacks, SMA 200, VWAP, ORB breaks, and volume expansion across weekly through 5-minute timeframes.</p>
+        </div>
+        <div class="status-card">
+          <span id="connection-dot" class="dot wait"></span>
+          <div>
+            <strong id="connection-label">Ready</strong>
+            <small id="updated-at">Not refreshed yet</small>
+          </div>
+        </div>
+      </section>
+
+      <section class="controls">
+        <label for="tickers">Ticker list</label>
+        <textarea id="tickers" spellcheck="false">AAPL, MSFT, NVDA, TSLA, SPY, QQQ</textarea>
+        <div class="control-row">
+          <button id="refresh">Refresh scan</button>
+          <span>Auto-refreshes every <strong>60 seconds</strong>.</span>
+        </div>
+      </section>
+
+      <section id="error-panel" class="errors hidden"></section>
+
+      <section class="table-card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Ticker</th><th>W</th><th>D</th><th>4H</th><th>65m/1H</th><th>30m</th><th>15m</th><th>10m</th><th>5m</th>
+                <th>ORB Status</th><th>VWAP Side</th><th>SMA 200 Side</th><th>Score</th><th>Bias</th><th>Entry Status</th>
+              </tr>
+            </thead>
+            <tbody id="dashboard-body">
+              <tr><td colspan="15" class="empty">Press Refresh scan to load the dashboard.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
