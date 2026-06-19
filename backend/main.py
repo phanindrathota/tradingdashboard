@@ -6,6 +6,8 @@ import time
 from json.decoder import JSONDecodeError
 from datetime import timedelta
 import os
+import io
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +95,10 @@ def download_history(ticker: str, period: str, interval: str, cache_bucket: int)
     last_exc: Exception | None = None
     for attempt in range(attempts):
         try:
-            data = yf.download(
+            # suppress yfinance noisy prints by redirecting stdout/stderr
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                data = yf.download(
                 ticker,
                 period=period,
                 interval=interval,
@@ -101,7 +106,7 @@ def download_history(ticker: str, period: str, interval: str, cache_bucket: int)
                 progress=False,
                 threads=False,
                 prepost=False,
-            )
+                )
             if data.empty:
                 # try again via loop; if all attempts exhausted we'll fallback below
                 last_exc = None
@@ -138,17 +143,14 @@ def generate_mock_history(ticker: str, period: str, interval: str) -> pd.DataFra
     freq_map = {
         "1wk": "W",
         "1d": "D",
-        "1h": "H",
-        "30m": "30T",
-        "15m": "15T",
-        "5m": "5T",
-        "10m": "10T",
+        "1h": "h",
+        "30m": "30min",
+        "15m": "15min",
+        "5m": "5min",
+        "10m": "10min",
     }
-    # Determine frequency and number of points from period
-    if interval in ("1wk", "1wk"):
-        freq = "W"
-    else:
-        freq = freq_map.get(interval, "D")
+    # Determine frequency from interval
+    freq = freq_map.get(interval, "D")
 
     # Choose a span for mock data based on period
     if "y" in period:
@@ -164,16 +166,18 @@ def generate_mock_history(ticker: str, period: str, interval: str) -> pd.DataFra
     else:
         days = 30
 
-    end = pd.Timestamp.utcnow().floor("T")
+    end = pd.Timestamp.utcnow().floor("min")
     start = end - pd.Timedelta(days=days)
     rng = pd.date_range(start=start, end=end, freq=freq)
     if rng.empty:
         rng = pd.date_range(end=end, periods=50, freq=freq)
 
     # generate a simple price series
-    base = 100.0 + (hash(ticker) % 100) * 0.1
+    seed = abs(hash(ticker)) % (2**32)
+    rng_state = np.random.RandomState(seed)
+    base = 100.0 + (seed % 100) * 0.1
     prices = base + pd.Series(range(len(rng))).astype(float).cumsum() * 0.01
-    noise = (pd.Series(np.random.RandomState(0).normal(scale=0.5, size=len(rng))))
+    noise = pd.Series(rng_state.normal(scale=0.5, size=len(rng)))
     close = prices + noise
     openp = close.shift(1).fillna(close.iloc[0])
     high = pd.concat([openp, close], axis=1).max(axis=1) + 0.5
