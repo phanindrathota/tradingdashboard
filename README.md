@@ -25,6 +25,14 @@ ALPHAVANTAGE_API_KEY=your_key_here python3 -m uvicorn backend.main:app --host 0.
 
 If the key is present the backend will try Alpha Vantage first and fall back to yfinance or mock data when necessary.
 
+- To explicitly prefer Alpha Vantage over yfinance set `PREFER_ALPHAVANTAGE=1` (default). To prefer `yfinance` even when you have an Alpha Vantage key, set `PREFER_ALPHAVANTAGE=0`.
+
+Example preferring yfinance despite having an Alpha Vantage key:
+
+```bash
+ALPHAVANTAGE_API_KEY=your_key_here PREFER_ALPHAVANTAGE=0 python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
 Open http://127.0.0.1:8000/ in your browser.
 # MTF Dashboard Agent
 

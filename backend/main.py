@@ -28,6 +28,7 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 # Environment toggle: set USE_MOCK=1|true to force demo/mock OHLCV data
 USE_MOCK = os.environ.get("USE_MOCK", "").lower() in ("1", "true", "yes")
 ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY", "")
+PREFER_ALPHAVANTAGE = os.environ.get("PREFER_ALPHAVANTAGE", "true").lower() in ("1", "true", "yes")
 
 TIMEFRAMES: dict[str, dict[str, Any]] = {
     "W": {"period": "2y", "interval": "1wk"},
@@ -87,20 +88,7 @@ def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return resampled.dropna(subset=["Open", "High", "Low", "Close"])
 
 
-@lru_cache(maxsize=512)
-def download_history(ticker: str, period: str, interval: str, cache_bucket: int) -> pd.DataFrame:
-    del cache_bucket
-    if USE_MOCK:
-        return normalize_frame(generate_mock_history(ticker, period, interval))
-    # Prefer Alpha Vantage if API key provided (falls back to yfinance)
-    if ALPHAVANTAGE_API_KEY:
-        try:
-            av_df = fetch_av_history(ticker, period, interval, ALPHAVANTAGE_API_KEY)
-            if not av_df.empty:
-                return normalize_frame(av_df)
-        except Exception:
-            # fall through to yfinance fallback
-            pass
+def _try_yfinance(ticker: str, period: str, interval: str) -> pd.DataFrame:
     attempts = 3
     delay = 1
     last_exc: Exception | None = None
@@ -110,16 +98,15 @@ def download_history(ticker: str, period: str, interval: str, cache_bucket: int)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 data = yf.download(
-                ticker,
-                period=period,
-                interval=interval,
-                auto_adjust=False,
-                progress=False,
-                threads=False,
-                prepost=False,
+                    ticker,
+                    period=period,
+                    interval=interval,
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False,
+                    prepost=False,
                 )
             if data.empty:
-                # try again via loop; if all attempts exhausted we'll fallback below
                 last_exc = None
                 continue
             return normalize_frame(data)
@@ -137,13 +124,54 @@ def download_history(ticker: str, period: str, interval: str, cache_bucket: int)
                 delay *= 2
                 continue
             raise
-    # If we get here the download attempts failed or returned empty. Provide a mock
-    # OHLCV dataset so the dashboard can function for demos and offline use.
+    # return empty to indicate no data from yfinance (caller may fallback)
+    return pd.DataFrame()
+
+
+@lru_cache(maxsize=512)
+def download_history(ticker: str, period: str, interval: str, cache_bucket: int) -> pd.DataFrame:
+    del cache_bucket
+    if USE_MOCK:
+        return normalize_frame(generate_mock_history(ticker, period, interval))
+
+    last_exc: Exception | None = None
+
+    def try_av() -> pd.DataFrame:
+        try:
+            av_df = fetch_av_history(ticker, period, interval, ALPHAVANTAGE_API_KEY)
+            if not av_df.empty:
+                return normalize_frame(av_df)
+        except Exception as exc:
+            nonlocal last_exc
+            last_exc = exc
+        return pd.DataFrame()
+
+    # Order attempts based on preference flag
+    if ALPHAVANTAGE_API_KEY and PREFER_ALPHAVANTAGE:
+        df = try_av()
+        if not df.empty:
+            return df
+        df = _try_yfinance(ticker, period, interval)
+        if not df.empty:
+            return df
+    elif ALPHAVANTAGE_API_KEY and not PREFER_ALPHAVANTAGE:
+        df = _try_yfinance(ticker, period, interval)
+        if not df.empty:
+            return df
+        df = try_av()
+        if not df.empty:
+            return df
+    else:
+        df = _try_yfinance(ticker, period, interval)
+        if not df.empty:
+            return df
+
+    # If we get here no live provider returned data. Provide a mock OHLCV dataset
+    # so the dashboard can function for demos and offline use.
     try:
         mock = generate_mock_history(ticker, period, interval)
         return normalize_frame(mock)
     except Exception:
-        # re-raise last exception if mocking also fails
         if last_exc:
             raise last_exc
         raise
