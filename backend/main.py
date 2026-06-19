@@ -22,6 +22,9 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 app = FastAPI(title="MTF Dashboard Agent", version="2.0.0")
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
+# Environment toggle: set USE_MOCK=1|true to force demo/mock OHLCV data
+USE_MOCK = os.environ.get("USE_MOCK", "").lower() in ("1", "true", "yes")
+
 TIMEFRAMES: dict[str, dict[str, Any]] = {
     "W": {"period": "2y", "interval": "1wk"},
     "D": {"period": "1y", "interval": "1d"},
@@ -83,6 +86,8 @@ def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
 @lru_cache(maxsize=512)
 def download_history(ticker: str, period: str, interval: str, cache_bucket: int) -> pd.DataFrame:
     del cache_bucket
+    if USE_MOCK:
+        return normalize_frame(generate_mock_history(ticker, period, interval))
     attempts = 3
     delay = 1
     last_exc: Exception | None = None

@@ -1,3 +1,21 @@
+# tradingdashboard
+
+MTF Dashboard Agent — multi-timeframe scanner using Yahoo Finance (yfinance).
+
+Run locally:
+
+```bash
+# Install deps
+pip install -r requirements.txt
+
+# Run server
+USE_MOCK=1 python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+- Setting `USE_MOCK=1` forces demo/mock OHLCV data (useful offline or behind rate limits).
+- By default the app will attempt live downloads and fallback to mock data when downloads fail.
+
+Open http://127.0.0.1:8000/ in your browser.
 # MTF Dashboard Agent
 
 A local FastAPI + HTML/CSS/JavaScript dashboard that scans Yahoo Finance data with `yfinance` and summarizes bull, bear, and chop conditions across multiple timeframes.
