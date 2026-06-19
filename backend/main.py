@@ -116,14 +116,16 @@ def _try_yfinance(ticker: str, period: str, interval: str) -> pd.DataFrame:
                 time.sleep(delay)
                 delay *= 2
                 continue
-            raise
+            # final attempt failed; do not raise here — return empty to allow caller fallback
+            break
         except Exception as exc:  # fallback retry for intermittent network/errors
             last_exc = exc
             if attempt < attempts - 1:
                 time.sleep(delay)
                 delay *= 2
                 continue
-            raise
+            # final attempt failed; don't raise, let caller fallback
+            break
     # return empty to indicate no data from yfinance (caller may fallback)
     return pd.DataFrame()
 
@@ -358,7 +360,14 @@ def scan_ticker(ticker: str, cache_bucket: int) -> dict[str, Any]:
     frames: dict[str, pd.DataFrame] = {}
 
     for label, config in TIMEFRAMES.items():
-        frames[label] = frame_for_ticker(ticker, label, config, cache_bucket)
+        try:
+            frames[label] = frame_for_ticker(ticker, label, config, cache_bucket)
+        except Exception:
+            # Fallback to per-timeframe mock if live fetching/resampling fails for this timeframe
+            try:
+                frames[label] = normalize_frame(generate_mock_history(ticker, config["period"], config["interval"]))
+            except Exception:
+                frames[label] = pd.DataFrame()
         signals[label] = compute_signal(label, frames[label])
 
     intraday = signals["15m"]
